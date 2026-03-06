@@ -59,8 +59,21 @@ mod test_remote;
 pub use util::HttpErrorJson;
 
 #[get("/")]
-fn root_index(state: &State<ServerState>) -> Option<(ContentType, Vec<u8>)> {
-    get_file("index.html".into(), state)
+fn root_index(state: &State<ServerState>) -> (ContentType, Vec<u8>) {
+    // 若嵌入的 webui 为空（打包时未先构建 aw-webui），返回说明页而非 404
+    if let Some((ct, body)) = get_file("index.html".into(), state) {
+        return (ct, body);
+    }
+    let fallback = r#"<!DOCTYPE html><html><head><meta charset="utf-8"><title>ActivityWatch</title></head><body>
+<h1>Web UI 未嵌入</h1>
+<p>本程序在编译时未包含前端资源（打包前需先构建 aw-webui）。</p>
+<p>请使用完整安装包重新安装，或确保用 <code>http://127.0.0.1:5600</code> 或 <code>http://localhost:5600</code> 访问。</p>
+<p>API 仍可用，例如 <a href="/api/0/info">/api/0/info</a>。</p>
+</body></html>"#;
+    (
+        ContentType::HTML,
+        fallback.as_bytes().to_vec(),
+    )
 }
 
 #[get("/css/<file..>")]

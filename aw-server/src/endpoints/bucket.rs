@@ -65,10 +65,13 @@ pub fn bucket_new(
             .data
             .insert("device_id".to_string(), state.device_id.clone().into());
     }
-    let datastore = endpoints_get_lock!(state.datastore);
-    let ret = datastore.create_bucket(&bucket);
+    let ret = {
+        let datastore = endpoints_get_lock!(state.datastore);
+        datastore.create_bucket(&bucket)
+    };
     match ret {
         Ok(_) => {
+            // 必须在释放 datastore 锁之后再调用，否则 resolve_forward_remote 内再次 lock 会死锁
             forward_remote::maybe_forward_create_bucket(state, config, bucket_id, &bucket);
             Ok(())
         }
@@ -161,9 +164,13 @@ pub fn bucket_events_heartbeat(
     config: &State<AWConfig>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.heartbeat(bucket_id, heartbeat.clone(), pulsetime) {
+    let result = {
+        let datastore = endpoints_get_lock!(state.datastore);
+        datastore.heartbeat(bucket_id, heartbeat.clone(), pulsetime)
+    };
+    match result {
         Ok(e) => {
+            // 必须在释放 datastore 锁之后再调用，否则 resolve_forward_remote 内再次 lock 会死锁
             forward_remote::maybe_forward_heartbeat(state, config, bucket_id, pulsetime, &heartbeat);
             Ok(Json(e))
         }
