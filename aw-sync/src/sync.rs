@@ -70,12 +70,14 @@ pub fn sync_run(
     // aw-server-rust, which is not necessarily true (aw-server-python has seperate device_id).
     // Therefore, this may sometimes fail to pick up the correct local datastore.
     let device_id = info.device_id.as_str();
+    // Keep the exact local staging database path so we only exclude our own sync cache.
+    let local_db_path = local_remote_db_path(sync_spec.path.as_path(), device_id);
 
     // FIXME: Bad device_id assumption?
     let ds_localremote = setup_local_remote(sync_spec.path.as_path(), device_id)?;
     let remote_dbfiles = crate::util::find_remotes_nonlocal(
         sync_spec.path.as_path(),
-        device_id,
+        local_db_path.as_path(),
         sync_spec.path_db.as_ref(),
     );
 
@@ -144,9 +146,12 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
 
     // FIXME: Incorrect device_id assumption?
     let device_id = info.device_id.as_str();
+    // Reuse the same exact-path filtering as sync mode to avoid listing our own staging DB.
+    let local_db_path = local_remote_db_path(sync_directory, device_id);
     let ds_localremote = setup_local_remote(sync_directory, device_id)?;
 
-    let remote_dbfiles = crate::util::find_remotes_nonlocal(sync_directory, device_id, None);
+    let remote_dbfiles =
+        crate::util::find_remotes_nonlocal(sync_directory, local_db_path.as_path(), None);
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening
@@ -165,6 +170,11 @@ pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Returns the staging database path for the current device inside the host sync directory.
+fn local_remote_db_path(path: &Path, device_id: &str) -> PathBuf {
+    path.join(device_id).join("test.db")
+}
+
 fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn Error>> {
     // FIXME: Don't run twice if already exists
     fs::create_dir_all(path)?;
@@ -172,7 +182,7 @@ fn setup_local_remote(path: &Path, device_id: &str) -> Result<Datastore, Box<dyn
     let remotedir = path.join(device_id);
     fs::create_dir_all(&remotedir)?;
 
-    let dbfile = remotedir.join("test.db");
+    let dbfile = local_remote_db_path(path, device_id);
 
     // Print a message if dbfile doesn't already exist
     if !dbfile.exists() {

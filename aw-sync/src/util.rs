@@ -88,24 +88,29 @@ fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(dbs)
 }
 
+/// Compares database paths using both the raw path and canonical path when available.
+fn is_same_db_path(path: &Path, local_db_path: &Path) -> bool {
+    if path == local_db_path {
+        return true;
+    }
+
+    match (fs::canonicalize(path), fs::canonicalize(local_db_path)) {
+        (Ok(path_canonical), Ok(local_canonical)) => path_canonical == local_canonical,
+        _ => false,
+    }
+}
+
 /// Returns a list of all remotes, excluding local ones
 pub fn find_remotes_nonlocal(
     sync_directory: &Path,
-    device_id: &str,
+    local_db_path: &Path,
     sync_db: Option<&PathBuf>,
 ) -> Vec<PathBuf> {
     let remotes_all = find_remotes(sync_directory).unwrap();
     remotes_all
         .into_iter()
-        // Filter out own remote
-        .filter(|path| {
-            !(path
-                .clone()
-                .into_os_string()
-                .into_string()
-                .unwrap()
-                .contains(device_id))
-        })
+        // Filter out the local staging database using an exact path comparison.
+        .filter(|path| !is_same_db_path(path, local_db_path))
         // If sync_db is Some, return only remotes in that path
         .filter(|path| {
             if let Some(sync_db) = sync_db {
@@ -115,4 +120,48 @@ pub fn find_remotes_nonlocal(
             }
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::find_remotes_nonlocal;
+    use std::fs::{self, File};
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Creates a unique temporary directory for filesystem-based tests.
+    fn create_temp_dir(test_name: &str) -> PathBuf {
+        let timestamp_ns = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let temp_dir = std::env::temp_dir().join(format!(
+            "aw-sync-{test_name}-{}-{timestamp_ns}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&temp_dir).unwrap();
+        temp_dir
+    }
+
+    /// Creates a fake sync database file in the expected `{device_id}/test.db` layout.
+    fn create_sync_db(sync_root: &Path, device_id: &str) -> PathBuf {
+        let device_dir = sync_root.join(device_id);
+        fs::create_dir_all(&device_dir).unwrap();
+        let db_path = device_dir.join("test.db");
+        File::create(&db_path).unwrap();
+        db_path
+    }
+
+    #[test]
+    fn test_find_remotes_nonlocal_excludes_local_db_path() {
+        let sync_root = create_temp_dir("exclude-local-db");
+        let local_db_path = create_sync_db(&sync_root, "local-device");
+        let remote_db_path = create_sync_db(&sync_root, "remote-device");
+
+        let remote_paths = find_remotes_nonlocal(&sync_root, &local_db_path, None);
+
+        assert_eq!(remote_paths, vec![remote_db_path]);
+
+        fs::remove_dir_all(sync_root).unwrap();
+    }
 }
