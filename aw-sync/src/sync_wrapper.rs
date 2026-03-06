@@ -7,6 +7,11 @@ use aw_client_rust::blocking::AwClient;
 pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
     let hostnames = crate::util::get_remotes()?;
     for host in hostnames {
+        // Skip the current host to avoid pulling back the data we just staged locally.
+        if host == client.hostname {
+            info!("Skipping local host during pull_all: {}", host);
+            continue;
+        }
         pull(&host, client)?
     }
     Ok(())
@@ -14,6 +19,12 @@ pub fn pull_all(client: &AwClient) -> Result<(), Box<dyn Error>> {
 
 pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
     client.wait_for_start()?;
+
+    // Guard explicit pulls as well, so a self-host request does not create a sync loop.
+    if host == client.hostname {
+        info!("Skipping pull for local host: {}", host);
+        return Ok(());
+    }
 
     // Path to the sync folder
     // Sync folder is structured ./{hostname}/{device_id}/test.db

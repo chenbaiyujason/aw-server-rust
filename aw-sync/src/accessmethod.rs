@@ -20,6 +20,7 @@ pub trait AccessMethod: std::fmt::Debug {
         limit: Option<u64>,
     ) -> Result<Vec<Event>, String>;
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String>;
+    fn delete_event(&self, bucket_id: &str, event_id: i64) -> Result<(), String>;
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String>;
     fn heartbeat(&self, bucket_id: &str, event: Event, duration: f64) -> Result<(), String>;
     fn close(&self);
@@ -53,6 +54,11 @@ impl AccessMethod for Datastore {
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         Datastore::insert_events(self, bucket_id, &events[..]).unwrap();
+        self.force_commit().unwrap();
+        Ok(())
+    }
+    fn delete_event(&self, bucket_id: &str, event_id: i64) -> Result<(), String> {
+        Datastore::delete_events_by_id(self, bucket_id, vec![event_id]).unwrap();
         self.force_commit().unwrap();
         Ok(())
     }
@@ -94,6 +100,9 @@ impl AccessMethod for AwClient {
     }
     fn insert_events(&self, bucket_id: &str, events: Vec<Event>) -> Result<(), String> {
         AwClient::insert_events(self, bucket_id, events).map_err(|e| e.to_string())
+    }
+    fn delete_event(&self, bucket_id: &str, event_id: i64) -> Result<(), String> {
+        AwClient::delete_event(self, bucket_id, event_id).map_err(|e| e.to_string())
     }
     fn get_event_count(&self, bucket_id: &str) -> Result<i64, String> {
         Ok(AwClient::get_event_count(self, bucket_id).unwrap())
