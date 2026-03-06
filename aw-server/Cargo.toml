@@ -34,6 +34,7 @@ aw-datastore = { path = "../aw-datastore" }
 aw-models = { path = "../aw-models" }
 aw-transform = { path = "../aw-transform" }
 aw-query = { path = "../aw-query" }
+reqwest = { version = "0.11", default-features = false, features = ["json", "blocking"] }
 
 [target.'cfg(target_os="linux")'.dependencies]
 sd-notify = "0.4.2"

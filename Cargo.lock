@@ -275,6 +275,7 @@ dependencies = [
  "log",
  "log-panics",
  "openssl-sys",
+ "reqwest",
  "rocket",
  "rocket_cors",
  "rust-embed",

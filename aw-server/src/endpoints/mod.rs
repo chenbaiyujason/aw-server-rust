@@ -53,6 +53,7 @@ mod hostcheck;
 mod import;
 mod query;
 mod settings;
+mod test_remote;
 
 pub use util::HttpErrorJson;
 
@@ -188,6 +189,10 @@ pub fn build_rocket(server_state: ServerState, config: AWConfig) -> rocket::Rock
                 settings::setting_delete,
                 settings::settings_get,
             ],
+        )
+        .mount(
+            "/api/0/test-remote-server",
+            routes![test_remote::test_remote_server],
         )
         .mount("/", rocket_cors::catch_all_options_routes());
 
