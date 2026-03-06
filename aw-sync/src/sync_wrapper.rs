@@ -1,5 +1,4 @@
 use std::error::Error;
-use std::fs;
 
 use crate::sync::{sync_run, SyncMode, SyncSpec};
 use aw_client_rust::blocking::AwClient;
@@ -26,40 +25,16 @@ pub fn pull(host: &str, client: &AwClient) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    // Path to the sync folder
-    // Sync folder is structured ./{hostname}/{device_id}/test.db
+    // 同步目录结构: ./{hostname}/{device_id}/test.db
+    // 对该 host 下所有逻辑设备（所有 UUID 的 db）都执行 pull，由 sync_run 内 find_remotes 发现全部，
+    // sync_one 按事件身份 (timestamp+data) 合并去重，同身份保留更长 duration。
     let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
     let sync_dir = sync_root_dir.join(host);
-    let dbs = fs::read_dir(&sync_dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().is_dir())
-        .map(|entry| fs::read_dir(entry.path()))
-        .filter_map(Result::ok)
-        .flatten()
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.path().is_file()
-                && entry.path().extension().and_then(|os_str| os_str.to_str()) == Some("db")
-        })
-        .collect::<Vec<_>>();
-
-    // if more than one db, warn and use the largest one
-    if dbs.len() > 1 {
-        warn!(
-            "More than one db found in sync folder for host, choosing largest db {:?}",
-            dbs
-        );
-    }
-
-    let db = dbs
-        .into_iter()
-        .max_by_key(|entry| entry.metadata().map(|m| m.len()).unwrap_or(0))
-        .ok_or_else(|| format!("No db found in sync folder {:?}", sync_dir))?;
 
     let sync_spec = SyncSpec {
-        path: sync_dir.clone(),
-        path_db: Some(db.path().clone()),
-        buckets: None, // Sync all buckets by default
+        path: sync_dir,
+        path_db: None, // 不指定单个 db，让 sync_run 对该 host 下所有 device 的 db 都拉取并合并
+        buckets: None,
         start: None,
     };
     sync_run(client, &sync_spec, SyncMode::Pull)?;
