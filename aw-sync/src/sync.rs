@@ -9,6 +9,7 @@ extern crate chrono;
 extern crate reqwest;
 extern crate serde_json;
 
+use std::collections::{BTreeMap, HashMap};
 use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,7 @@ use chrono::{DateTime, Utc};
 
 use aw_datastore::{Datastore, DatastoreError};
 use aw_models::{Bucket, Event};
+use serde_json::{Map, Value};
 
 #[cfg(feature = "cli")]
 use clap::ValueEnum;
@@ -199,39 +201,16 @@ pub fn create_datastore(path: &Path) -> Datastore {
 }
 
 /// Returns the sync-destination bucket for a given bucket, creates it if it doesn't exist.
-fn get_or_create_sync_bucket(
-    bucket_from: &Bucket,
-    ds_to: &dyn AccessMethod,
-    is_push: bool,
-) -> Bucket {
-    let new_id = if is_push {
-        bucket_from.id.clone()
-    } else {
-        // Ensure the bucket ID ends in "-synced-from-{device id}"
-        let orig_bucketid = bucket_from.id.split("-synced-from-").next().unwrap();
-        let fallback = serde_json::to_value(&bucket_from.hostname).unwrap();
-        let origin = bucket_from
-            .data
-            .get("$aw.sync.origin")
-            .unwrap_or(&fallback)
-            .as_str()
-            .unwrap();
-        format!("{orig_bucketid}-synced-from-{origin}")
-    };
-
-    match ds_to.get_bucket(new_id.as_str()) {
+/// Buckets now keep the same ID on all devices to avoid "-synced-from-*" fanout.
+fn get_or_create_sync_bucket(bucket_from: &Bucket, ds_to: &dyn AccessMethod) -> Bucket {
+    let bucket_id = bucket_from.id.clone();
+    match ds_to.get_bucket(bucket_id.as_str()) {
         Ok(bucket) => bucket,
         Err(DatastoreError::NoSuchBucket(_)) => {
             let mut bucket_new = bucket_from.clone();
-            bucket_new.id = new_id.clone();
-            // TODO: Replace sync origin with hostname/GUID and discuss how we will treat the data
-            // attributes for internal use.
-            bucket_new.data.insert(
-                "$aw.sync.origin".to_string(),
-                serde_json::json!(bucket_from.hostname),
-            );
+            bucket_new.id = bucket_id.clone();
             ds_to.create_bucket(&bucket_new).unwrap();
-            match ds_to.get_bucket(new_id.as_str()) {
+            match ds_to.get_bucket(bucket_id.as_str()) {
                 Ok(bucket) => bucket,
                 Err(e) => panic!("{e:?}"),
             }
@@ -240,7 +219,7 @@ fn get_or_create_sync_bucket(
     }
 }
 
-/// Syncs all buckets from `ds_from` to `ds_to` with `-synced` appended to the ID of the destination bucket.
+/// Syncs all buckets from `ds_from` to `ds_to` using the same bucket ID on both sides.
 ///
 /// is_push: a bool indicating if we're pushing local buckets to the sync dir
 ///          (as opposed to pulling from remotes)
@@ -252,8 +231,6 @@ pub fn sync_datastores(
     src_did: Option<&str>,
     sync_spec: &SyncSpec,
 ) {
-    // FIXME: "-synced" should only be appended when synced to the local database, not to the
-    // staging area for local buckets.
     info!("Syncing {:?} to {:?}", ds_from, ds_to);
 
     let mut buckets_from: Vec<Bucket> = ds_from
@@ -298,9 +275,39 @@ pub fn sync_datastores(
     buckets_from.sort_by_key(|b| b.metadata.end);
 
     for bucket_from in buckets_from {
-        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to, is_push);
+        let bucket_to = get_or_create_sync_bucket(&bucket_from, ds_to);
         sync_one(ds_from, ds_to, bucket_from, bucket_to);
     }
+}
+
+/// Create a deterministic JSON string by sorting object keys recursively.
+fn canonicalize_json(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut sorted = BTreeMap::<String, Value>::new();
+            for (key, child_value) in map {
+                sorted.insert(key.clone(), canonicalize_json(child_value));
+            }
+            let mut output = Map::<String, Value>::new();
+            for (key, child_value) in sorted {
+                output.insert(key, child_value);
+            }
+            Value::Object(output)
+        }
+        Value::Array(items) => {
+            let mapped_items = items.iter().map(canonicalize_json).collect::<Vec<Value>>();
+            Value::Array(mapped_items)
+        }
+        _ => value.clone(),
+    }
+}
+
+/// Build event identity using `timestamp + data` (duration intentionally excluded).
+fn event_identity(event: &Event) -> String {
+    let timestamp = event.timestamp.to_rfc3339();
+    let canonical_data = canonicalize_json(&Value::Object(event.data.clone()));
+    let data_json = serde_json::to_string(&canonical_data).unwrap();
+    format!("{timestamp}|{data_json}")
 }
 
 /// Syncs a single bucket from one datastore to another
@@ -310,89 +317,70 @@ fn sync_one(
     bucket_from: Bucket,
     bucket_to: Bucket,
 ) {
-    let eventcount_to_old = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
     info!(" ⟳  Syncing bucket '{}'", bucket_to.id);
 
-    // Sync events
-    // FIXME: This should use bucket_to.metadata.end, but it doesn't because it doesn't work
-    // for empty buckets (Should be None, is Some(unknown_time))
-    // let resume_sync_at = bucket_to.metadata.end;
-    let most_recent_events = ds_to
-        .get_events(bucket_to.id.as_str(), None, None, Some(1))
-        .unwrap();
-    let resume_sync_at = most_recent_events.first().map(|e| e.timestamp + e.duration);
-
-    if let Some(resume_time) = resume_sync_at {
-        info!("   + Resuming at {:?}", resume_time);
-    } else {
-        info!("   + Starting from beginning");
-    }
-
-    // Fetch events
-    // Unset ID on events, as they are not globally unique
-    // TODO: Fetch at most ~5,000 events at a time (or so, to avoid timeout from huge buckets)
-    let mut events: Vec<Event> = ds_from
-        .get_events(bucket_from.id.as_str(), resume_sync_at, None, None)
+    // Fetch all source and destination events so we can perform identity-based union merge.
+    let source_events: Vec<Event> = ds_from
+        .get_events(bucket_from.id.as_str(), None, None, None)
         .unwrap()
-        .iter()
-        .map(|e| {
-            let mut new_e = e.clone();
-            new_e.id = None;
-            new_e
+        .into_iter()
+        .map(|mut event| {
+            event.id = None;
+            event
         })
         .collect();
+    let destination_events = ds_to
+        .get_events(bucket_to.id.as_str(), None, None, None)
+        .unwrap();
 
-    // Sort ascending
-    // FIXME: What happens here if two events have the same timestamp?
-    events.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-
-    // TODO: Do bulk insert using insert_events instead? (for performance)
-    //       Client-side heartbeat queueing should keep things somewhat performant though?
-    // NOTE: First event needs to be inserted with heartbeat, to ensure appropriate
-    // merging/updating of pulsed events.
-    let events_total = events.len();
-    let mut events_sent = 0;
-    let mut events_iter = events.into_iter();
-    if let Some(e) = events_iter.next() {
-        ds_to.heartbeat(bucket_to.id.as_str(), e, 0.0).unwrap();
-        events_sent += 1;
+    // Build an index of destination events by identity to support union merge.
+    let mut destination_index = HashMap::<String, Event>::new();
+    for event in destination_events {
+        let identity = event_identity(&event);
+        destination_index.insert(identity, event);
     }
 
-    const BATCH_SIZE: usize = 5000;
-    if BATCH_SIZE == 1 {
-        // TODO: Don't print progress messages if not in a suitable terminal environment (such as a
-        // pipe or systemd journal)
-        for event in events_iter {
-            print!("{} ({}/{})\r", &event.timestamp, events_sent, events_total);
-            ds_to.heartbeat(bucket_to.id.as_str(), event, 0.0).unwrap();
-            events_sent += 1;
-        }
-    } else {
-        let mut batch_events = Vec::with_capacity(BATCH_SIZE);
-        for e in events_iter {
-            print!("{} ({}/{})\r", e.timestamp, events_sent, events_total);
-            batch_events.push(e);
-            events_sent += 1;
-            if batch_events.len() >= BATCH_SIZE {
-                ds_to
-                    .insert_events(bucket_to.id.as_str(), batch_events.clone())
-                    .unwrap();
-                batch_events.clear();
+    let mut inserted_events = Vec::<Event>::new();
+    let mut replaced_events_count = 0_i64;
+    for source_event in source_events {
+        let identity = event_identity(&source_event);
+        if let Some(existing_event) = destination_index.get(&identity) {
+            if source_event.duration > existing_event.duration {
+                // We treat this as the same event and keep the longer duration.
+                if let Some(existing_event_id) = existing_event.id {
+                    ds_to
+                        .delete_event(bucket_to.id.as_str(), existing_event_id)
+                        .unwrap();
+                    let mut updated_event = source_event.clone();
+                    updated_event.id = None;
+                    ds_to
+                        .insert_events(bucket_to.id.as_str(), vec![updated_event.clone()])
+                        .unwrap();
+                    destination_index.insert(identity, updated_event);
+                    replaced_events_count += 1;
+                }
             }
+            continue;
         }
 
-        if !batch_events.is_empty() {
-            ds_to
-                .insert_events(bucket_to.id.as_str(), batch_events)
-                .unwrap();
-        }
+        let mut new_event = source_event.clone();
+        new_event.id = None;
+        inserted_events.push(new_event.clone());
+        destination_index.insert(identity, new_event);
     }
 
-    let eventcount_to_new = ds_to.get_event_count(bucket_to.id.as_str()).unwrap();
-    let new_events_count = eventcount_to_new - eventcount_to_old;
-    assert!(new_events_count >= 0);
-    if new_events_count > 0 {
-        info!("  = Synced {} new events", new_events_count);
+    if !inserted_events.is_empty() {
+        ds_to
+            .insert_events(bucket_to.id.as_str(), inserted_events.clone())
+            .unwrap();
+    }
+
+    if !inserted_events.is_empty() || replaced_events_count > 0 {
+        info!(
+            "  = Synced {} new events, updated {} existing events",
+            inserted_events.len(),
+            replaced_events_count
+        );
     } else {
         info!("  ✓ Already up to date!");
     }

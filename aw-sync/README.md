@@ -71,7 +71,15 @@ We also avoid having to implement complex features such as conflict resolution, 
 - It doesn't support Android, yet.
 - It mirrors events to all devices, 
   - If you have a lot of devices you'll get a lot of duplicates, taking up a lot of space and potentially impacting performance.
-- It doesn't support modifying/deleting events, yet.
+- Deletes are intentionally not propagated. Sync uses union-only merge to recover missing data.
+
+### How event merge works
+
+- Buckets keep the same ID on all devices (no `-synced-from-*` suffix buckets are created)
+- Event identity is `timestamp + data`
+- If an event exists on one side but not the other, the missing side gets that event
+- If identity matches but duration differs, the longer duration wins
+- Events deleted on one device are not removed from other devices during sync
 
 ---
 
