@@ -14,6 +14,8 @@ use aw_models::TryVec;
 use rocket::http::Status;
 use rocket::State;
 
+use crate::config::AWConfig;
+use crate::endpoints::forward_remote;
 use crate::endpoints::util::BucketsExportRocket;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
@@ -49,6 +51,7 @@ pub fn bucket_new(
     bucket_id: &str,
     message: Json<Bucket>,
     state: &State<ServerState>,
+    config: &State<AWConfig>,
 ) -> Result<(), HttpErrorJson> {
     let mut bucket = message.into_inner();
     if bucket.id != bucket_id {
@@ -65,7 +68,10 @@ pub fn bucket_new(
     let datastore = endpoints_get_lock!(state.datastore);
     let ret = datastore.create_bucket(&bucket);
     match ret {
-        Ok(_) => Ok(()),
+        Ok(_) => {
+            forward_remote::maybe_forward_create_bucket(state, config, bucket_id, &bucket);
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -152,11 +158,15 @@ pub fn bucket_events_heartbeat(
     heartbeat_json: Json<Event>,
     pulsetime: f64,
     state: &State<ServerState>,
+    config: &State<AWConfig>,
 ) -> Result<Json<Event>, HttpErrorJson> {
     let heartbeat = heartbeat_json.into_inner();
     let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.heartbeat(bucket_id, heartbeat, pulsetime) {
-        Ok(e) => Ok(Json(e)),
+    match datastore.heartbeat(bucket_id, heartbeat.clone(), pulsetime) {
+        Ok(e) => {
+            forward_remote::maybe_forward_heartbeat(state, config, bucket_id, pulsetime, &heartbeat);
+            Ok(Json(e))
+        }
         Err(err) => Err(err.into()),
     }
 }

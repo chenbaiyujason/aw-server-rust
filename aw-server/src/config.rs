@@ -40,6 +40,25 @@ pub struct AWConfig {
     // custom visualizations are located.
     #[serde(default = "default_custom_static")]
     pub custom_static: std::collections::HashMap<String, String>,
+
+    /// 收到 create_bucket/heartbeat 后，best-effort 转发到远程（所有 watcher 统一由此同步）
+    #[serde(default)]
+    pub forward_remote: Option<ForwardRemoteConfig>,
+}
+
+/// 转发到远程 aw-server 的配置（config.toml 中 [forward_remote]）
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+pub struct ForwardRemoteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub hostname: String,
+    #[serde(default = "default_forward_port")]
+    pub port: u16,
+}
+
+fn default_forward_port() -> u16 {
+    5600
 }
 
 impl Default for AWConfig {
@@ -51,6 +70,7 @@ impl Default for AWConfig {
             cors: default_cors(),
             cors_regex: default_cors(),
             custom_static: default_custom_static(),
+            forward_remote: None,
         }
     }
 }
