@@ -142,18 +142,25 @@ pub fn sync_run(
 
 #[allow(dead_code)]
 pub fn list_buckets(client: &AwClient) -> Result<(), Box<dyn Error>> {
-    let sync_directory = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
-    let sync_directory = sync_directory.as_path();
+    let sync_root_dir = crate::dirs::get_sync_dir().map_err(|_| "Could not get sync dir")?;
+    let local_host_sync_dir = sync_root_dir.join(&client.hostname);
     let info = client.get_info()?;
 
     // FIXME: Incorrect device_id assumption?
     let device_id = info.device_id.as_str();
     // Reuse the same exact-path filtering as sync mode to avoid listing our own staging DB.
-    let local_db_path = local_remote_db_path(sync_directory, device_id);
-    let ds_localremote = setup_local_remote(sync_directory, device_id)?;
+    let local_db_path = local_remote_db_path(local_host_sync_dir.as_path(), device_id);
+    let ds_localremote = setup_local_remote(local_host_sync_dir.as_path(), device_id)?;
 
-    let remote_dbfiles =
-        crate::util::find_remotes_nonlocal(sync_directory, local_db_path.as_path(), None);
+    // 同时列出新旧两种布局下的远端数据库，方便排查兼容性问题。
+    let mut remote_dbfiles = Vec::<PathBuf>::new();
+    for sync_source_dir in crate::util::get_remote_sync_dirs(sync_root_dir.as_path())? {
+        remote_dbfiles.extend(crate::util::find_remotes_nonlocal(
+            sync_source_dir.as_path(),
+            local_db_path.as_path(),
+            None,
+        ));
+    }
     info!("Found remotes: {:?}", remote_dbfiles);
 
     // TODO: Check for compatible remote db version before opening

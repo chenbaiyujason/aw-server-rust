@@ -211,7 +211,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     start: start_date,
                 };
 
-                sync::sync_run(&client, &sync_spec, mode)?
+                if mode == sync::SyncMode::Pull || mode == sync::SyncMode::Both {
+                    sync_wrapper::pull_all_with_spec(&client, &sync_spec)?;
+                }
+
+                if mode == sync::SyncMode::Push || mode == sync::SyncMode::Both {
+                    sync_wrapper::push_with_hostname_and_spec(&client, &client.hostname, &sync_spec)?;
+                }
             } else {
                 // Simple host-based sync mode (backwards compatibility)
                 // Pull
@@ -278,7 +284,10 @@ fn daemon(
     };
 
     loop {
-        if let Err(e) = sync::sync_run(client, &sync_spec, sync::SyncMode::Both) {
+        let sync_result = sync_wrapper::pull_all_with_spec(client, &sync_spec)
+            .and_then(|_| sync_wrapper::push_with_hostname_and_spec(client, &client.hostname, &sync_spec));
+
+        if let Err(e) = sync_result {
             error!("Error during sync cycle: {}", e);
             return Err(e);
         }

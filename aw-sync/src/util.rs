@@ -76,6 +76,34 @@ pub fn get_remotes() -> Result<Vec<String>, Box<dyn Error>> {
     Ok(hostnames)
 }
 
+/// 返回所有可用于 pull 的同步源目录。
+///
+/// 新布局使用 `./{host}/{device_id}/test.db`，旧布局使用 `./{device_id}/test.db`。
+/// 这里会同时返回 host 目录，以及仍然存在旧布局时的根目录。
+pub fn get_remote_sync_dirs(sync_root_dir: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+    fs::create_dir_all(sync_root_dir)?;
+
+    let mut sync_source_dirs = Vec::<PathBuf>::new();
+
+    if contains_subdir_with_db_file(sync_root_dir) {
+        // 兼容旧布局：根目录下直接放 device 子目录。
+        sync_source_dirs.push(sync_root_dir.to_path_buf());
+    }
+
+    let host_dirs = fs::read_dir(sync_root_dir)?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && contains_subdir_with_db_file(path))
+        .collect::<Vec<PathBuf>>();
+
+    sync_source_dirs.extend(host_dirs);
+    sync_source_dirs.sort();
+    sync_source_dirs.dedup();
+
+    info!("Found sync source directories: {:?}", sync_source_dirs);
+    Ok(sync_source_dirs)
+}
+
 /// Returns a list of all remote dbs
 fn find_remotes(sync_directory: &Path) -> std::io::Result<Vec<PathBuf>> {
     let dbs = fs::read_dir(sync_directory)?
@@ -122,9 +150,28 @@ pub fn find_remotes_nonlocal(
         .collect()
 }
 
+/// 根据数据库文件路径推断其所属的同步源目录。
+///
+/// 支持：
+/// - `./{host}/{device_id}/test.db`
+/// - `./{device_id}/test.db`
+pub fn infer_sync_directory_for_db(
+    sync_root_dir: &Path,
+    sync_db_path: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    let relative_path = sync_db_path.strip_prefix(sync_root_dir)?;
+    let path_components = relative_path.components().collect::<Vec<_>>();
+
+    match path_components.len() {
+        2 => Ok(sync_root_dir.to_path_buf()),
+        3 => Ok(sync_root_dir.join(path_components[0].as_os_str())),
+        _ => Err("Sync db path must match either host/device/test.db or device/test.db".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_remotes_nonlocal;
+    use super::{find_remotes_nonlocal, get_remote_sync_dirs, infer_sync_directory_for_db};
     use std::fs::{self, File};
     use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -161,6 +208,41 @@ mod tests {
         let remote_paths = find_remotes_nonlocal(&sync_root, &local_db_path, None);
 
         assert_eq!(remote_paths, vec![remote_db_path]);
+
+        fs::remove_dir_all(sync_root).unwrap();
+    }
+
+    #[test]
+    fn test_get_remote_sync_dirs_supports_host_and_legacy_layouts() {
+        let sync_root = create_temp_dir("remote-sync-dirs");
+
+        let legacy_db_path = create_sync_db(&sync_root, "legacy-device");
+        let host_sync_dir = sync_root.join("host-a");
+        let host_db_path = create_sync_db(&host_sync_dir, "device-a");
+
+        let sync_source_dirs = get_remote_sync_dirs(&sync_root).unwrap();
+
+        assert!(sync_source_dirs.contains(&sync_root));
+        assert!(sync_source_dirs.contains(&host_sync_dir));
+        assert!(legacy_db_path.exists());
+        assert!(host_db_path.exists());
+
+        fs::remove_dir_all(sync_root).unwrap();
+    }
+
+    #[test]
+    fn test_infer_sync_directory_for_db_supports_both_layouts() {
+        let sync_root = create_temp_dir("infer-sync-dir");
+
+        let legacy_db_path = create_sync_db(&sync_root, "legacy-device");
+        let host_sync_dir = sync_root.join("host-b");
+        let host_db_path = create_sync_db(&host_sync_dir, "device-b");
+
+        let legacy_dir = infer_sync_directory_for_db(&sync_root, &legacy_db_path).unwrap();
+        let host_dir = infer_sync_directory_for_db(&sync_root, &host_db_path).unwrap();
+
+        assert_eq!(legacy_dir, sync_root);
+        assert_eq!(host_dir, host_sync_dir);
 
         fs::remove_dir_all(sync_root).unwrap();
     }
