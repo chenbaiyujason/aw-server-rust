@@ -142,11 +142,19 @@ pub fn bucket_events_create(
     bucket_id: &str,
     events: Json<Vec<Event>>,
     state: &State<ServerState>,
+    config: &State<AWConfig>,
 ) -> Result<Json<Vec<Event>>, HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    let res = datastore.insert_events(bucket_id, &events);
+    let events = events.into_inner();
+    let res = {
+        let datastore = endpoints_get_lock!(state.datastore);
+        datastore.insert_events(bucket_id, &events)
+    };
     match res {
-        Ok(events) => Ok(Json(events)),
+        Ok(inserted_events) => {
+            // 事件批量写入也属于 bucket 写入口，需要和 heartbeat 一样补上双写。
+            forward_remote::maybe_forward_insert_events(state, config, bucket_id, &events);
+            Ok(Json(inserted_events))
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -196,10 +204,18 @@ pub fn bucket_events_delete_by_id(
     bucket_id: &str,
     event_id: i64,
     state: &State<ServerState>,
+    config: &State<AWConfig>,
 ) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_events_by_id(bucket_id, vec![event_id]) {
-        Ok(_) => Ok(()),
+    let result = {
+        let datastore = endpoints_get_lock!(state.datastore);
+        datastore.delete_events_by_id(bucket_id, vec![event_id])
+    };
+    match result {
+        Ok(_) => {
+            // 删除事件也需要同步到远端，避免远端残留历史记录。
+            forward_remote::maybe_forward_delete_event(state, config, bucket_id, event_id);
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }
@@ -228,10 +244,21 @@ pub fn bucket_export(
 }
 
 #[delete("/<bucket_id>")]
-pub fn bucket_delete(bucket_id: &str, state: &State<ServerState>) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(state.datastore);
-    match datastore.delete_bucket(bucket_id) {
-        Ok(_) => Ok(()),
+pub fn bucket_delete(
+    bucket_id: &str,
+    state: &State<ServerState>,
+    config: &State<AWConfig>,
+) -> Result<(), HttpErrorJson> {
+    let result = {
+        let datastore = endpoints_get_lock!(state.datastore);
+        datastore.delete_bucket(bucket_id)
+    };
+    match result {
+        Ok(_) => {
+            // bucket 删除后，远端也应立即删除整个 bucket。
+            forward_remote::maybe_forward_delete_bucket(state, config, bucket_id);
+            Ok(())
+        }
         Err(err) => Err(err.into()),
     }
 }

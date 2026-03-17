@@ -40,6 +40,7 @@ pub mod android {
 
     use crate::config::AWConfig;
     use crate::endpoints;
+    use crate::endpoints::forward_remote;
     use crate::endpoints::ServerState;
     use aw_client_rust::blocking::AwClient;
     use aw_client_rust::classes::default_classes;
@@ -196,8 +197,18 @@ pub mod android {
             Ok(json) => json,
             Err(err) => return create_error_object(&env, err.to_string()),
         };
-        match openDatastore().create_bucket(&bucket_json) {
-            Ok(()) => string_to_jstring(&env, "Bucket successfully created".to_string()),
+        let datastore = openDatastore();
+        match datastore.create_bucket(&bucket_json) {
+            Ok(()) => {
+                // Android JNI 直连 datastore，不会经过 Rocket 路由，因此这里显式补上双写。
+                forward_remote::maybe_forward_create_bucket_for_datastore(
+                    &datastore,
+                    &AWConfig::default(),
+                    &bucket_json.id,
+                    &bucket_json,
+                );
+                string_to_jstring(&env, "Bucket successfully created".to_string())
+            }
             Err(e) => create_error_object(
                 &env,
                 format!("Something went wrong when trying to create bucket: {:?}", e),
@@ -220,8 +231,19 @@ pub mod android {
             Ok(json) => json,
             Err(err) => return create_error_object(&env, err.to_string()),
         };
-        match openDatastore().heartbeat(&bucket_id, event_json, pulsetime) {
-            Ok(_) => string_to_jstring(&env, "Heartbeat successfully received".to_string()),
+        let datastore = openDatastore();
+        match datastore.heartbeat(&bucket_id, event_json.clone(), pulsetime) {
+            Ok(_) => {
+                // Android JNI 直连 datastore，不会经过 Rocket 路由，因此这里显式补上双写。
+                forward_remote::maybe_forward_heartbeat_for_datastore(
+                    &datastore,
+                    &AWConfig::default(),
+                    &bucket_id,
+                    pulsetime,
+                    &event_json,
+                );
+                string_to_jstring(&env, "Heartbeat successfully received".to_string())
+            }
             Err(e) => create_error_object(
                 &env,
                 format!(

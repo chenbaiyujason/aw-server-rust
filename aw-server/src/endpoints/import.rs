@@ -3,18 +3,23 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 use rocket::State;
 
-use std::sync::Mutex;
-
 use aw_models::BucketsExport;
 
-use aw_datastore::Datastore;
-
+use crate::config::AWConfig;
+use crate::endpoints::forward_remote;
 use crate::endpoints::{HttpErrorJson, ServerState};
 
-fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(), HttpErrorJson> {
-    let datastore = endpoints_get_lock!(datastore_mutex);
+fn import(
+    state: &State<ServerState>,
+    config: &State<AWConfig>,
+    import: BucketsExport,
+) -> Result<(), HttpErrorJson> {
     for (_bucketname, bucket) in import.buckets {
-        match datastore.create_bucket(&bucket) {
+        let result = {
+            let datastore = endpoints_get_lock!(state.datastore);
+            datastore.create_bucket(&bucket)
+        };
+        match result {
             Ok(_) => (),
             Err(e) => {
                 let err_msg = format!("Failed to import bucket: {e:?}");
@@ -22,6 +27,8 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
                 return Err(HttpErrorJson::new(Status::InternalServerError, err_msg));
             }
         }
+        // import 会把 bucket 以及内嵌 events 一起落库，远端也需要收到同样的完整 bucket。
+        forward_remote::maybe_forward_create_bucket(state, config, &bucket.id, &bucket);
     }
     Ok(())
 }
@@ -29,9 +36,10 @@ fn import(datastore_mutex: &Mutex<Datastore>, import: BucketsExport) -> Result<(
 #[post("/", data = "<json_data>", format = "application/json")]
 pub fn bucket_import_json(
     state: &State<ServerState>,
+    config: &State<AWConfig>,
     json_data: Json<BucketsExport>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, json_data.into_inner())
+    import(state, config, json_data.into_inner())
 }
 
 #[derive(FromForm)]
@@ -47,7 +55,8 @@ pub struct ImportForm {
 #[post("/", data = "<form>", format = "multipart/form-data")]
 pub fn bucket_import_form(
     state: &State<ServerState>,
+    config: &State<AWConfig>,
     form: Form<ImportForm>,
 ) -> Result<(), HttpErrorJson> {
-    import(&state.datastore, form.into_inner().import.into_inner())
+    import(state, config, form.into_inner().import.into_inner())
 }

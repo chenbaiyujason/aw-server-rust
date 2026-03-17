@@ -49,7 +49,7 @@ mod util;
 mod bucket;
 mod cors;
 mod export;
-mod forward_remote;
+pub(crate) mod forward_remote;
 mod hostcheck;
 mod import;
 mod query;
